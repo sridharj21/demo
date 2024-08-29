@@ -1,0 +1,118 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_DEFAULT_REGION = 'eu-west-3'  // Your AWS region
+        ECR_REPO_URI = '330716407122.dkr.ecr.eu-west-3.amazonaws.com/test'  // Your ECR repo URI
+        ECS_CLUSTER = 'my-ecs-cluster'  // Your ECS cluster name
+        ECS_SERVICE = 'my-ecs-service'  // Your ECS service name
+        IMAGE_TAG = 'latest'  // Your image tag
+        AWS_ACCOUNT_ID = '330716407122'  // Your AWS account ID
+        TASK_DEFINITION_FAMILY = 'my-task-def-family' // Your task definition family
+        CONTAINER_NAME = 'httpd'  // Your container name
+        EXECUTION_ROLE_ARN = 'arn:aws:iam::330716407122:role/ecsTaskExecutionRole'  // Your execution role ARN
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                // Checkout your code from the repository
+                git url: 'https://github.com/sridharj21/Hello.git', branch: 'main'
+            }
+        }
+
+        stage('Login to ECR') {
+            steps {
+                script {
+                    // Login to ECR
+                    sh "aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPO_URI"
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    // Build the Docker image
+                    dockerImage = docker.build "$ECR_REPO_URI:$IMAGE_TAG"
+                }
+            }
+        }
+
+        stage('Push to ECR') {
+            steps {
+                script {
+                    // Push the Docker image to ECR
+                    docker.withRegistry("https://$ECR_REPO_URI") {
+                        dockerImage.push("$IMAGE_TAG")
+                    }
+                }
+            }
+        }
+
+        stage('Create ECS Cluster') {
+            steps {
+                script {
+                    // Create ECS cluster if it does not exist
+                    sh """
+                    if ! aws ecs describe-clusters --clusters $ECS_CLUSTER | grep "clusterArn"; then
+                        aws ecs create-cluster --cluster-name $ECS_CLUSTER
+                    else
+                        echo "Cluster $ECS_CLUSTER already exists"
+                    fi
+                    """
+                }
+            }
+        }
+
+        stage('Register Task Definition') {
+            steps {
+                script {
+                    // Define the task definition JSON
+                    def taskDefinition = """
+                    {
+                      "family": "$TASK_DEFINITION_FAMILY",
+                      "executionRoleArn": "$EXECUTION_ROLE_ARN",
+                      "networkMode": "awsvpc",
+                      "requiresCompatibilities": ["FARGATE"],
+                      "cpu": "256",
+                      "memory": "512",
+                      "containerDefinitions": [
+                        {
+                          "name": "$CONTAINER_NAME",
+                          "image": "$ECR_REPO_URI:$IMAGE_TAG",
+                          "essential": true,
+                          "portMappings": [
+                            {
+                              "containerPort": 80,
+                              "hostPort": 80,
+                              "protocol": "tcp"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                    """
+                   
+                }
+            }
+        }
+
+        stage('Create or Update ECS Service') {
+            steps {
+                script {
+                    // Create or update the ECS service
+                    sh """
+                    if ! aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE | grep "serviceArn"; then
+                        aws ecs create-service --cluster $ECS_CLUSTER --service-name $ECS_SERVICE --task-definition $TASK_DEFINITION_FAMILY --desired-count 1 --launch-type FARGATE --network-configuration awsvpcConfiguration={subnets=[subnet-077e6f828d8019c6b],securityGroups=[sg-04a69f145c4e29cd3],assignPublicIp=ENABLED}
+                    else
+                        aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --task-definition $TASK_DEFINITION_FAMILY --force-new-deployment
+                    fi
+                    """
+                }
+            }
+        }
+    }
+
+   
+}
