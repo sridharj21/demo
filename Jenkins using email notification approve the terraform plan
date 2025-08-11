@@ -1,0 +1,111 @@
+
+pipeline {
+    agent any
+
+    environment {
+        APPROVER_EMAIL = 'sridhar.jayakumar@securekloud.com '
+        AWS_REGION = 'ap-south-1'
+    }
+
+    stages {
+        stage("Connecting to CodeCommit") {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'Access-key-123', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'Secert-key-123', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh '''
+                        echo "✅ Connecting to CodeCommit..."
+                        git config --global credential.helper '!aws codecommit credential-helper $@'
+                        git config --global credential.UseHttpPath true
+
+                        export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+                        export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+                        export AWS_REGION=ap-south-1
+
+                        rm -rf Sridhar-Repo || true
+                        git clone https://git-codecommit.ap-south-1.amazonaws.com/v1/repos/Sridhar-Repo
+
+                        cd Sridhar-Repo
+                        ls -l
+                    '''
+                }
+            }
+        }
+
+        stage("Terraform_CMD") {
+            steps {
+                sh '''
+                    cd Sridhar-Repo
+                    terraform init -reconfigure
+                    terraform plan -out=tfplan.out > tfplan.txt
+                    
+                '''
+               
+            }
+        }
+
+        stage("Send Plan for Approval") {
+    steps {
+        emailext (
+            to: "${env.APPROVER_EMAIL}",
+            subject: "Terraform Plan - Approval Needed: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            body: """\
+Hi,
+
+Please find the Terraform plan output below for your review and approval.
+
+Regards,
+Jenkins Pipeline
+
+Build URL: ${env.BUILD_URL}
+""",
+            attachmentsPattern: '**/Sridhar-Repo/tfplan.txt'
+        )
+    }
+}
+
+        stage("Wait for Approval") {
+            steps {
+                script {
+                    timeout(time: 30, unit: 'MINUTES') {
+                        input message: 'Do you approve the deployment?', ok: 'Approve'
+                    }
+                    echo "✅ Deployment approved. Continuing pipeline..."
+                }
+            }
+        }
+
+        stage("TF Apply") {
+            steps {
+                sh '''
+                    cd Sridhar-Repo
+                    terraform apply -auto-approve
+                '''
+            }
+        }
+
+        stage("Notification Mail") {
+            steps {
+                mail to: 'sridhar.jayakumar@securekloud.com',
+                     subject: "Jenkins Build Notification: ${currentBuild.fullDisplayName}",
+                     body: """\
+Build Status: ${currentBuild.currentResult}
+Project: ${env.JOB_NAME}
+Build Number: ${env.BUILD_NUMBER}
+Build URL: ${env.BUILD_URL}
+"""
+            }
+        }
+    }
+
+    post {
+        failure {
+            emailext(
+                subject: "❌ Jenkins Build Failed - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: "The build has failed. Check the console output at: ${env.BUILD_URL}",
+                to: "${env.APPROVER_EMAIL}"
+            )
+        }
+    }
+}
